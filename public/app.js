@@ -12,14 +12,24 @@ const fmt = new Intl.NumberFormat("ko-KR");
 const chartViews = {};
 
 function number(value, suffix = "") {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "N/A";
   return `${fmt.format(Math.round(Number(value) * 100) / 100)}${suffix}`;
 }
 
 function signed(value, suffix = "%") {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "N/A";
   const n = Number(value);
   return `${n > 0 ? "+" : ""}${n.toFixed(2)}${suffix}`;
+}
+
+function marketCap(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "N/A";
+  const uk = Math.round(Number(value) / 100000000);
+  if (uk >= 10000) {
+    const jo = uk / 10000;
+    return `${Number.isInteger(jo) ? fmt.format(jo) : fmt.format(Math.round(jo * 10) / 10)}조원`;
+  }
+  return `${fmt.format(uk)}억원`;
 }
 
 function clsByRate(value) {
@@ -283,7 +293,7 @@ function renderDetail() {
     </div>
 
     <div class="metric-grid">
-      ${metric("시가총액", number(stock.market_cap), "", help("market_cap"))}
+      ${metric("시가총액", marketCap(stock.market_cap), "", help("market_cap"))}
       ${metric("PER", compare(stock.per, stock.sector_per), "", help("per"))}
       ${metric("PBR", compare(stock.pbr, stock.sector_pbr), "", help("pbr"))}
       ${metric("ROE", number(stock.roe, "%"), "", help("roe"))}
