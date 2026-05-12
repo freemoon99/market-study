@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>당일 시장 정리</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>당일 시장 정리</h1>
+      <p id="status">한국 증시 상한가와 거래량 1000만주 종목을 자동 정리합니다.</p>
+    </div>
+    <div class="controls">
+      <input id="dateInput" type="date">
+      <button id="loadBtn" title="선택 날짜 보기">보기</button>
+      <button id="refreshBtn" title="KRX와 뉴스 데이터 새로 수집">갱신</button>
+      <button id="exportBtn" class="icon-btn" title="Markdown으로 내보내기" aria-label="Markdown으로 내보내기">MD↓</button>
+      <button id="themeBtn" class="mode-toggle" title="다크모드/라이트모드 전환" aria-label="화면 모드 전환">
+        <span class="toggle-knob"></span>
+        <span id="themeLabel">Dark</span>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="summary" aria-label="요약">
+      <div class="count-strip">
+        <div><span id="limitCount">0</span><small>상한가</small></div>
+        <div><span id="volumeCount">0</span><small>거래량 1000만주</small></div>
+        <div><span id="totalCount">0</span><small>총 종목</small></div>
+      </div>
+      <div class="theme-panel">
+        <div class="panel-title">당일 테마</div>
+        <div id="themeTags" class="theme-tags"></div>
+        <p id="moodText"></p>
+      </div>
+    </section>
+
+    <section class="tabview">
+      <nav class="tabs" aria-label="보기 전환">
+        <button class="tab active" data-view="detailView">종목 상세</button>
+        <button class="tab" data-view="quadrantView">주식 4분면</button>
+        <button class="tab" data-view="rrgView">RRG</button>
+      </nav>
+
+      <section id="detailView" class="layout view active">
+        <aside class="side">
+          <label for="searchInput">종목 검색</label>
+          <input id="searchInput" type="search" placeholder="종목명 또는 코드">
+          <select id="filterSelect" aria-label="종목 필터">
+            <option value="all">전체 종목</option>
+            <option value="limit">상한가</option>
+            <option value="volume">거래량 1000만주</option>
+            <option value="streak">연속 출현</option>
+            <option value="theme">테마 포함</option>
+          </select>
+          <div id="stockList" class="stock-list"></div>
+        </aside>
+
+        <section id="detail" class="detail empty">
+          <div class="empty-state">날짜를 선택하고 갱신을 누르면 오늘의 학습 후보가 정리됩니다.</div>
+        </section>
+      </section>
+
+      <section id="quadrantView" class="plot-view view">
+        <div class="plot-head">
+          <h2>주식 4분면</h2>
+          <p>가로축은 거래량 에너지, 세로축은 가격 모멘텀입니다.</p>
+        </div>
+        <div id="quadrants" class="quadrant-plot"></div>
+      </section>
+
+      <section id="rrgView" class="plot-view view">
+        <div class="plot-head">
+          <h2>RRG</h2>
+          <p>가로축은 상대강도, 세로축은 모멘텀입니다.</p>
+        </div>
+        <div id="rrgPlot" class="quadrant-plot rrg-plot"></div>
+      </section>
+    </section>
+  </main>
+
+  <template id="stockButtonTemplate">
+    <button class="stock-button">
+      <span class="stock-button-name"></span>
+      <span class="stock-button-meta"></span>
+    </button>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>
