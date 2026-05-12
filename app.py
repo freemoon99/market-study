@@ -472,7 +472,8 @@ def fetch_research_items(name):
 def fetch_naver_basic(code):
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     try:
-        raw = http_get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).decode("utf-8", errors="ignore")
+        body = http_get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        raw = body.decode("euc-kr", errors="ignore")
     except Exception:
         return {}
     sector = None
@@ -494,7 +495,40 @@ def fetch_naver_basic(code):
         company_paragraphs = [p for p in company_paragraphs if p]
         company_text = " ".join(company_paragraphs)[:520]
     financials = extract_financial_rows(raw)
-    return {"sector": sector, "roe": roe, "company_text": company_text, "company_paragraphs": company_paragraphs, "financials": financials}
+    values = extract_naver_finance_values(raw)
+    if values.get("roe") is not None:
+        roe = values["roe"]
+    return {
+        "sector": sector,
+        "roe": roe,
+        "company_text": company_text,
+        "company_paragraphs": company_paragraphs,
+        "financials": financials,
+        **values,
+    }
+
+
+def extract_naver_finance_values(raw):
+    values = {}
+    id_map = {
+        "market_cap": "_market_sum",
+        "per": "_per",
+        "eps": "_eps",
+        "pbr": "_pbr",
+    }
+    for key, element_id in id_map.items():
+        m = re.search(rf'id="{re.escape(element_id)}"[^>]*>(.*?)</', raw, flags=re.S)
+        if m:
+            parsed = parse_float(strip_tags(m.group(1))) if key != "market_cap" else parse_int(strip_tags(m.group(1)))
+            if parsed is not None:
+                values[key] = parsed * 100_000_000 if key == "market_cap" else parsed
+    for label, key in (("PER", "per"), ("EPS", "eps"), ("PBR", "pbr"), ("ROE", "roe")):
+        if values.get(key) is not None:
+            continue
+        m = re.search(rf"{label}[^0-9\-]*([\-]?\d[\d,]*(?:\.\d+)?)", strip_tags(raw), flags=re.S)
+        if m:
+            values[key] = parse_float(m.group(1))
+    return values
 
 
 def extract_financial_rows(raw):
@@ -738,6 +772,16 @@ def normalize_row(row, fundamentals):
     }
 
 
+def fill_missing_financials(item, *sources):
+    for source in sources:
+        if not source:
+            continue
+        for key in ("market", "market_cap", "per", "pbr", "eps", "roe", "sector"):
+            value = source.get(key)
+            if item.get(key) is None and value is not None:
+                item[key] = value
+
+
 def enrich_and_store(date_iso):
     started = time.time()
     log("refresh:start", date=date_iso, engine="postgres" if USE_POSTGRES else "sqlite")
@@ -750,6 +794,18 @@ def enrich_and_store(date_iso):
         source_note = "Naver market snapshot fallback, Naver chart, Google News RSS"
         normalized = fetch_naver_market_snapshot()
         log("refresh:source:fallback:done", date=date_iso, rows=len(normalized))
+    krx_by_code = {}
+    try:
+        krx_daily = fetch_krx_daily(compact_date(date_iso))
+        krx_fundamentals = fetch_krx_fundamentals(compact_date(date_iso))
+        krx_by_code = {
+            row["code"]: row
+            for row in (normalize_row(row, krx_fundamentals) for row in krx_daily)
+            if row.get("code")
+        }
+        log("refresh:source:krx-financials:done", date=date_iso, rows=len(krx_by_code))
+    except Exception as exc:
+        log("refresh:source:krx-financials:failed", date=date_iso, error=repr(exc))
     now = dt.datetime.now().isoformat(timespec="seconds")
     selected = []
 
@@ -791,6 +847,7 @@ def enrich_and_store(date_iso):
         log("refresh:db:replace:start", date=date_iso, rows=len(selected))
         for idx, item in enumerate(selected, start=1):
             item_started = time.time()
+            fill_missing_financials(item, krx_by_code.get(item["code"]))
             log("refresh:item:start", date=date_iso, index=f"{idx}/{len(selected)}", code=item["code"], name=item["name"])
             try:
                 chart = fetch_naver_chart(item["code"])
@@ -819,8 +876,7 @@ def enrich_and_store(date_iso):
 
                 basic = fetch_naver_basic(item["code"])
                 log("refresh:item:basic:done", date=date_iso, code=item["code"], sector=basic.get("sector") or "-")
-                item["sector"] = basic.get("sector")
-                item["roe"] = basic.get("roe")
+                fill_missing_financials(item, basic)
                 reasons = fetch_naver_news(item["name"], item["code"], date_iso)
                 if not reasons:
                     reasons = [{"text": "당일 뉴스 없음: 직접 원인을 입력하거나 공시/거래량/테마를 확인하세요.", "url": "", "auto": True}]
@@ -1032,10 +1088,21 @@ def update_stock(date_iso, code, payload):
 
 def format_num(value):
     if value is None:
-        return "-"
+        return "N/A"
     if isinstance(value, float):
         return f"{value:,.2f}"
     return f"{value:,}"
+
+
+def format_market_cap(value):
+    if value is None:
+        return "N/A"
+    uk = round(value / 100_000_000)
+    if uk >= 10_000:
+        jo = uk / 10_000
+        label = f"{jo:,.1f}".rstrip("0").rstrip(".")
+        return f"{label}조원"
+    return f"{uk:,}억원"
 
 
 def markdown_link(text, url):
@@ -1095,7 +1162,7 @@ def export_markdown(date_iso):
             f"- 테마: {', '.join(s.get('themes', [])) or '-'}",
             f"- 현재가: {format_num(s['price'])}원 ({format_num(s['change_rate'])}%)",
             f"- 거래량: {format_num(s['volume'])}주, 전일 대비 {format_num(s['volume_vs_prev_pct'])}%, 20일 평균 대비 {format_num(s['volume_vs_avg20_pct'])}%",
-            f"- 시가총액: {format_num(s['market_cap'])}",
+            f"- 시가총액: {format_market_cap(s['market_cap'])}",
             f"- PER/PBR/ROE/EPS: {format_num(s['per'])} / {format_num(s['pbr'])} / {format_num(s['roe'])} / {format_num(s['eps'])}",
             "",
             "### 원인 후보",
