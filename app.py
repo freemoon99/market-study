@@ -250,6 +250,56 @@ def strip_tags(value):
     return html.unescape(value).replace("\xa0", " ").strip()
 
 
+def decode_html(body, default="euc-kr"):
+    head = body[:2000].decode("ascii", errors="ignore").lower()
+    m = re.search(r"charset=['\"]?([a-z0-9_\-]+)", head)
+    encodings = [m.group(1)] if m else []
+    encodings += [default, "utf-8", "cp949", "euc-kr"]
+    seen = set()
+    best = ""
+    best_score = -1
+    for enc in encodings:
+        if not enc or enc in seen:
+            continue
+        seen.add(enc)
+        try:
+            text = body.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        score = sum(1 for ch in text[:5000] if "가" <= ch <= "힣") - text[:5000].count("�") * 20
+        if score > best_score:
+            best = text
+            best_score = score
+    return best
+
+
+def clean_note_text(value, limit=None):
+    text = strip_tags(value or "")
+    text = re.sub(r"[\u200b\r\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -ㆍ·")
+    if limit and len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip() + "..."
+    return text
+
+
+def looks_broken_text(value):
+    text = str(value or "")
+    if not text:
+        return False
+    broken_marks = text.count("�") + text.count("Ã") + text.count("Â")
+    latin_mojibake = len(re.findall(r"[ìíëê][A-Za-z0-9¼½¾¸¹º°]*", text))
+    return broken_marks >= 2 or latin_mojibake >= 3
+
+
+def topic_particle(value):
+    if not value:
+        return "은(는)"
+    last = value[-1]
+    if not ("가" <= last <= "힣"):
+        return "은(는)"
+    return "은" if (ord(last) - ord("가")) % 28 else "는"
+
+
 def fetch_naver_market_snapshot():
     rows = []
     seen = set()
@@ -473,7 +523,7 @@ def fetch_naver_basic(code):
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     try:
         body = http_get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        raw = body.decode("euc-kr", errors="ignore")
+        raw = decode_html(body, default="euc-kr")
     except Exception:
         return {}
     sector = None
@@ -489,11 +539,11 @@ def fetch_naver_basic(code):
     summary_match = re.search(r'<div id="summary_info" class="summary_info">(.*?)<div class="txt_notice">', raw, flags=re.S)
     if summary_match:
         company_paragraphs = [
-            re.sub(r"\s+", " ", strip_tags(p)).strip()
+            clean_note_text(p, limit=260)
             for p in re.findall(r"<p>(.*?)</p>", summary_match.group(1), flags=re.S)
         ]
-        company_paragraphs = [p for p in company_paragraphs if p]
-        company_text = " ".join(company_paragraphs)[:520]
+        company_paragraphs = [p for p in company_paragraphs if p and not looks_broken_text(p)]
+        company_text = clean_note_text(" ".join(company_paragraphs[:2]), limit=420)
     financials = extract_financial_rows(raw)
     values = extract_naver_finance_values(raw)
     if values.get("roe") is not None:
@@ -534,13 +584,12 @@ def extract_naver_finance_values(raw):
 def extract_financial_rows(raw):
     rows = {}
     for label in ("매출액", "영업이익", "당기순이익", "부채비율", "유보율", "ROE", "PER", "PBR"):
-        m = re.search(rf"<th[^>]*>\s*(?:<strong>)?{label}(?:</strong>)?\s*</th>(.*?)</tr>", raw, flags=re.S)
+        m = re.search(rf"<th[^>]*>\s*(?:<strong>)?\s*{label}(?:\([^<]*\))?\s*(?:</strong>)?\s*</th>(.*?)</tr>", raw, flags=re.S)
         if not m:
             continue
         values = []
         for td in re.findall(r"<td[^>]*>(.*?)</td>", m.group(1), flags=re.S):
-            text = strip_tags(td)
-            text = re.sub(r"\s+", " ", text).strip()
+            text = clean_note_text(td)
             if text and text != "&nbsp;":
                 values.append(text)
         rows[label] = values
@@ -596,6 +645,10 @@ def extract_opinion(note):
 def should_refresh_auto_note(note):
     if not note:
         return True
+    if looks_broken_text(note):
+        return True
+    if "## " in note and "학습 노트" in note and "### 내 의견" in note:
+        return True
     placeholders = (
         "무엇을 하는 회사인가:",
         "주요 제품/서비스:",
@@ -642,26 +695,29 @@ def financial_brief(financials):
     if not financials:
         return ["네이버 금융 실적 테이블을 확인하지 못했습니다. 분기/연간 실적은 별도 확인이 필요합니다."]
     lines = []
-    sales = financials.get("매출액", [])
-    op = financials.get("영업이익", [])
-    net = financials.get("당기순이익", [])
+    sales = [v for v in financials.get("매출액", []) if v not in ("-", "N/A")]
+    op = [v for v in financials.get("영업이익", []) if v not in ("-", "N/A")]
+    net = [v for v in financials.get("당기순이익", []) if v not in ("-", "N/A")]
     if sales:
         lines.append(f"매출액 최근값: {sales[-1]}억원 수준으로 표시됩니다. 최근 연속값은 {' → '.join(sales[-4:])}입니다.")
     if op:
         lines.append(f"영업이익 최근값: {op[-1]}억원, 흐름은 {' → '.join(op[-4:])}입니다.")
     if net:
         lines.append(f"당기순이익 최근값: {net[-1]}억원, 흐름은 {' → '.join(net[-4:])}입니다.")
-    debt = financials.get("부채비율", [])
+    debt = [v for v in financials.get("부채비율", []) if v not in ("-", "N/A")]
     if debt:
         lines.append(f"부채비율 최근값: {debt[-1]}%로 재무 부담 변화를 같이 봅니다.")
     return lines[:4] or ["실적 수치가 충분하지 않습니다. 최근 분기보고서와 공시 확인이 필요합니다."]
 
 
 def business_points(company_paragraphs, sector):
-    text = " ".join(company_paragraphs or [])
+    company_paragraphs = [clean_note_text(p, limit=240) for p in (company_paragraphs or []) if p and not looks_broken_text(p)]
+    text = " ".join(company_paragraphs)
     points = []
     if company_paragraphs:
-        points.extend(company_paragraphs[:3])
+        points.append(company_paragraphs[0])
+        if len(company_paragraphs) > 1:
+            points.append(company_paragraphs[1])
     elif sector:
         points.append(f"{sector} 업종에 속한 기업으로, 업종 내 주요 제품/서비스와 매출 비중 확인이 필요합니다.")
     else:
@@ -688,7 +744,9 @@ def build_note(name, item=None, basic=None, reasons=None, research_items=None, p
         " ".join([r.get("text", "") for r in research_items]),
     )
     theme_text = ", ".join(themes) if themes else (basic.get("sector") or "뉴스/차트 확인 필요")
-    company_intro = basic.get("company_text") or f"{name}은(는) {basic.get('sector') or item.get('market') or '해당 시장'} 관련 종목입니다."
+    company_intro = clean_note_text(basic.get("company_text"), limit=420)
+    if not company_intro or looks_broken_text(company_intro):
+        company_intro = f"{name}{topic_particle(name)} {basic.get('sector') or item.get('market') or '해당 시장'} 관련 종목입니다."
     sector = basic.get("sector") or item.get("sector") or "-"
     business_lines = business_points(basic.get("company_paragraphs"), sector)
     performance_lines = financial_brief(basic.get("financials"))
@@ -698,6 +756,8 @@ def build_note(name, item=None, basic=None, reasons=None, research_items=None, p
     if not reason_lines:
         reason_lines = ["뉴스 원인 후보가 부족합니다. 공시, 뉴스, 거래원, 섹터 동향을 직접 확인하세요."]
     opinion = extract_opinion(previous_note)
+    avg_volume_pct = format_num(item.get("volume_vs_avg20_pct"))
+    avg_volume_pct = avg_volume_pct if avg_volume_pct == "N/A" else f"{avg_volume_pct}%"
     return (
         f"## {name} 학습 노트\n\n"
         "### 회사 소개\n"
@@ -713,7 +773,7 @@ def build_note(name, item=None, basic=None, reasons=None, research_items=None, p
         + "\n"
         + "### 오늘의 테마\n"
         + f"- 연결 테마: {theme_text}\n"
-        + f"- 수급 힌트: 거래량 {format_num(item.get('volume'))}주, 20일 평균 대비 {format_num(item.get('volume_vs_avg20_pct'))}%\n"
+        + f"- 수급 힌트: 거래량 {format_num(item.get('volume'))}주, 20일 평균 대비 {avg_volume_pct}\n"
         + "".join([f"- 원인 후보: {line}\n" for line in reason_lines])
         + "\n"
         "### 내 의견\n"
